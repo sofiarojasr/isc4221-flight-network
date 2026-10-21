@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U.S. Flight Network Explorer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f1ea; color: #222; }
+  header { background: #782F40; color: white; padding: 12px 20px; font-size: 1.3rem; font-weight: 600; }
+  .layout { display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; padding: 12px; }
+  .panel { background: white; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); margin-bottom: 12px; }
+  .panel h2 { margin: 0 0 8px; font-size: 1.05rem; display: flex; align-items: center; gap: 8px; }
+  .badge { background: #782F40; color: white; border-radius: 50%; width: 24px; height: 24px;
+           display: inline-flex; align-items: center; justify-content: center; font-size: .85rem; }
+  #map { height: 560px; border-radius: 6px; }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; }
+  .stat { background: #f4f1ea; border-radius: 6px; padding: 6px 10px; text-align: center; min-width: 70px; }
+  .stat b { display: block; font-size: 1.2rem; }
+  .hubrow { display: flex; align-items: center; gap: 6px; cursor: pointer; margin: 2px 0; font-size: .85rem; }
+  .hubrow .lab { width: 34px; }
+  .hubrow .bar { background: #CEB888; height: 12px; border-radius: 3px; }
+  .legend { background: white; padding: 6px 10px; border-radius: 6px; font-size: .8rem; line-height: 1.5; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  input, select { padding: 5px 8px; font-size: .9rem; border: 1px solid #bbb; border-radius: 5px; }
+  button { background: #CEB888; border: none; padding: 6px 14px; border-radius: 5px; font-weight: 600; cursor: pointer; }
+  button:hover { background: #bfa66f; }
+  .info { font-size: .88rem; line-height: 1.5; }
+  .info dt { float: left; width: 110px; color: #666; }
+  .info dd { margin: 0 0 2px 110px; }
+  .good { color: #1a7f37; font-weight: 700; font-size: 1.1rem; }
+  .bad { color: #b42318; font-weight: 700; font-size: 1.1rem; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>U.S. Flight Network Explorer</header>
+
+<div class="layout">
+  <div class="panel">
+    <h2><span class="badge">A</span> Network map</h2>
+    <div id="map"></div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2><span class="badge">B</span> Airport lookup</h2>
+      <div class="row">
+        <input id="b-input" type="text" maxlength="3" placeholder="e.g. TLH" size="6">
+        <button id="b-button">Search</button>
+      </div>
+      <div id="b-result" class="info">Type a code, or click an airport on the map.</div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="badge">C</span> Network summary</h2>
+      <div class="stats" id="c-stats"></div>
+      <h3 style="font-size:.9rem;margin:10px 0 4px">10 largest hubs (click one)</h3>
+      <div id="c-hubs"></div>
+      <h3 style="font-size:.9rem;margin:10px 0 4px">Connected components (click a small one)</h3>
+      <div id="c-comps"></div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="badge">D</span> Connection checker</h2>
+      <div class="row">
+        <select id="d-from"></select>
+        <select id="d-to"></select>
+        <button id="d-button">Check</button>
+      </div>
+      <div id="d-result" class="info"></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="margin:0 12px 12px">
+  <h2><span class="badge">E</span> About the data</h2>
+  <p class="info">
+    Data: <a href="https://openflights.org/data.html">OpenFlights</a> airports and routes, released under the
+    Open Database License. The route file is a snapshot from <b>2014</b>, so some routes no longer exist and
+    newer ones are missing. Each dot is a U.S. airport with a valid IATA code, and each line means at least one
+    airline flew directly between the two airports in either direction (international routes are removed, and
+    the many airline-by-direction route lines are merged into one undirected edge). Dot size is the airport's
+    degree, the number of airports it connects to directly. Panel D asks whether you can get from one airport
+    to another with any number of connections, and counts the fewest flights needed.
+    Code and report: <a href="https://github.com/FSU-4221C/fsu-4221c-26-lab-7b-flight-network-sofiarojasr">course repository</a>
+    and <a href="https://github.com/FSU-4221C/fsu-4221c-26-lab-7b-flight-network-sofiarojasr/blob/main/report.md">report.md</a>.
+  </p>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const GARNET = "#782F40", GOLD = "#CEB888", RED = "#d62728", BLUE = "#1f77b4";
+
+let airports, edges, summary, components, sortedCodes, adj;
+const markers = {};      // code -> Leaflet circleMarker
+const edgeLines = [];    // {a, b, line}
+let selected = null;
+let highlighted = [];
+
+// ---------- algorithms (ports of the Python versions) ----------
+
+// Part 3: binary search. Returns [index, number of comparisons].
+function findAirport(sortedCodes, code) {
+  let low = 0, high = sortedCodes.length - 1, n = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    n++;
+    if (sortedCodes[mid] === code) return [mid, n];
+    else if (sortedCodes[mid] < code) low = mid + 1;
+    else high = mid - 1;
+  }
+  return [-1, n];
+}
+
+function buildAdjacency(edges) {
+  const adj = {};
+  for (const [a, b] of edges) {
+    (adj[a] ||= []).push(b);
+    (adj[b] ||= []).push(a);
+  }
+  return adj;
+}
+
+// Part 4: connection algorithm. ('new' is a reserved word in JavaScript, so it is called layer.)
+function pathExists(adj, origin, destination) {
+  const used = new Set();
+  let layer = new Set([origin]);
+  const untouched = new Set(Object.keys(adj));
+  untouched.delete(origin);
+  let n = 0;
+  if (origin === destination) return { found: true, iterations: 0, reached: [origin] };
+  while (layer.size > 0) {
+    n++;
+    const next = new Set();
+    for (const a of layer) {
+      used.add(a);
+      for (const nb of adj[a]) {
+        if (untouched.has(nb)) {
+          untouched.delete(nb);
+          next.add(nb);
+        }
+      }
+    }
+    layer = next;
+    if (layer.has(destination)) {
+      return { found: true, iterations: n, reached: [...used, ...layer] };
+    }
+  }
+  return { found: false, iterations: n, reached: [...used] };
+}
+
+// ---------- map ----------
+
+const map = L.map("map", { preferCanvas: true }).setView([39.5, -98.35], 4);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 10, attribution: "© OpenStreetMap contributors"
+}).addTo(map);
+
+const files = ["airports", "edges", "summary", "components", "sorted_codes"];
+Promise.all(files.map(n => fetch("data/" + n + ".json").then(r => r.json())))
+  .then(([a, e, s, c, sc]) => {
+    airports = a; edges = e; summary = s; components = c; sortedCodes = sc;
+    adj = buildAdjacency(edges);
+    drawMap();
+    drawSummary();
+    setupLookup();
+    setupChecker();
+  })
+  .catch(err => console.error("Could not load data:", err));
+
+function drawMap() {
+  for (const [a, b] of edges) {
+    const line = L.polyline(
+      [[airports[a].lat, airports[a].lon], [airports[b].lat, airports[b].lon]],
+      { color: GARNET, weight: 0.6, opacity: 0.12 }
+    ).addTo(map);
+    edgeLines.push({ a, b, line });
+  }
+  for (const code in airports) {
+    const ap = airports[code];
+    const m = L.circleMarker([ap.lat, ap.lon], {
+      radius: 2 + 0.7 * Math.sqrt(ap.degree),
+      color: GARNET, weight: 1, fillColor: GOLD, fillOpacity: 0.85
+    }).addTo(map);
+    m.bindTooltip(code + " - " + ap.city);
+    m.on("click", () => selectAirport(code));
+    markers[code] = m;
+  }
+  const legend = L.control({ position: "bottomleft" });
+  legend.onAdd = () => {
+    const d = L.DomUtil.create("div", "legend");
+    d.innerHTML = "Dot size = degree (number of direct destinations)<br>" +
+                  "Faint lines = all routes<br>" +
+                  "<span style='color:" + RED + "'>Red lines</span> = selected airport's routes<br>" +
+                  "<span style='color:" + BLUE + "'>Blue dots</span> = airports reached by the checker or a component";
+    return d;
+  };
+  legend.addTo(map);
+}
+
+function selectAirport(code) {
+  if (selected) markers[selected].setStyle({ fillColor: GOLD });
+  selected = code;
+  for (const e of edgeLines) {
+    const hit = e.a === code || e.b === code;
+    e.line.setStyle(hit ? { color: RED, weight: 2, opacity: 0.9 }
+                        : { color: GARNET, weight: 0.6, opacity: 0.12 });
+    if (hit) e.line.bringToFront();
+  }
+  for (const c in markers) markers[c].bringToFront();
+  markers[code].setStyle({ fillColor: RED });
+  showAirport(code);
+}
+
+function highlightCodes(list) {
+  for (const c of highlighted) markers[c].setStyle({ fillColor: c === selected ? RED : GOLD });
+  highlighted = list;
+  for (const c of list) markers[c].setStyle({ fillColor: BLUE });
+}
+
+// ---------- panel B: airport lookup ----------
+
+function setupLookup() {
+  const input = document.getElementById("b-input");
+  const run = () => lookup(input.value);
+  document.getElementById("b-button").addEventListener("click", run);
+  input.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+}
+
+function lookup(text) {
+  const code = text.trim().toUpperCase();
+  const [idx, n] = findAirport(sortedCodes, code);
+  if (idx === -1) {
+    document.getElementById("b-result").innerHTML =
+      "<span class='bad'>" + (code || "(empty)") + " was not found</span> in this network." +
+      "<br>Binary search needed <b>" + n + "</b> comparisons to be sure.";
+    return;
+  }
+  selectAirport(code);
+}
+
+function showAirport(code) {
+  const ap = airports[code];
+  const [, n] = findAirport(sortedCodes, code);
+  const nearest = ap.nearest.map(([c, km]) => c + " (" + km + " km)").join(", ");
+  document.getElementById("b-result").innerHTML =
+    "<dl class='info'>" +
+    "<dt>Airport</dt><dd>" + code + " - " + ap.name + "</dd>" +
+    "<dt>City</dt><dd>" + ap.city + "</dd>" +
+    "<dt>Degree</dt><dd>" + ap.degree + "</dd>" +
+    "<dt>Direct destinations</dt><dd>" + ap.neighbors.join(", ") + "</dd>" +
+    "<dt>5 nearest airports</dt><dd>" + nearest + "</dd>" +
+    "<dt>Binary search</dt><dd>" + n + " comparisons</dd>" +
+    "</dl>";
+}
+
+// ---------- panel C: summary ----------
+
+function drawSummary() {
+  document.getElementById("c-stats").innerHTML =
+    stat(summary.n_airports, "Airports") + stat(summary.n_edges, "Routes") +
+    stat(summary.n_components, "Components") + stat(summary.hubs[0][0], "Largest hub");
+
+  const max = summary.hubs[0][1];
+  document.getElementById("c-hubs").innerHTML = summary.hubs.map(([code, deg]) =>
+    "<div class='hubrow' onclick=\"selectAirport('" + code + "')\">" +
+    "<span class='lab'>" + code + "</span>" +
+    "<div class='bar' style='width:" + (100 * deg / max * 0.7) + "%'></div>" +
+    "<span>" + deg + "</span></div>").join("");
+
+  document.getElementById("c-comps").innerHTML = components.map((c, i) =>
+    "<div class='hubrow' onclick='highlightCodes(components[" + i + "])'>" +
+    "<span>Component " + (i + 1) + ": " + c.length + " airports</span></div>").join("");
+}
+
+function stat(n, label) {
+  return "<div class='stat'><b>" + n + "</b>" + label + "</div>";
+}
+
+// ---------- panel D: connection checker ----------
+
+function setupChecker() {
+  const options = sortedCodes.map(c =>
+    "<option value='" + c + "'>" + c + " - " + airports[c].city + "</option>").join("");
+  const from = document.getElementById("d-from");
+  const to = document.getElementById("d-to");
+  from.innerHTML = options;
+  to.innerHTML = options;
+  from.value = "TLH";
+  to.value = "SEA";
+  document.getElementById("d-button").addEventListener("click", checkConnection);
+}
+
+function checkConnection() {
+  const a = document.getElementById("d-from").value;
+  const b = document.getElementById("d-to").value;
+  const r = pathExists(adj, a, b);          // runs here, in the browser, every click
+  highlightCodes(r.reached);
+  const box = document.getElementById("d-result");
+  if (r.found) {
+    box.innerHTML = "<div class='good'>Path exists</div>" +
+      "Iterations: " + r.iterations + "<br>Fewest flights: " + r.iterations;
+  } else {
+    box.innerHTML = "<div class='bad'>No path</div>" +
+      "Iterations: " + r.iterations + "<br>The " + r.reached.length +
+      " airports reachable from " + a + " are highlighted; " + b + " is not one of them.";
+  }
+}
+</script>
+</body>
+</html>
